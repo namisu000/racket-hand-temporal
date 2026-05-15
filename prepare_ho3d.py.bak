@@ -1,0 +1,95 @@
+import os
+import pickle
+import numpy as np
+from tqdm import tqdm
+
+
+def load_pkl(path):
+    with open(path, 'rb') as f:
+        return pickle.load(f, encoding='latin1')
+
+
+def flip_hand_pose(hand_pose):
+    """
+    오른손 hand_pose(45,)를 왼손으로 반전
+    axis-angle 표현에서 y, z축 반전으로 좌우 대칭
+    """
+    flipped = hand_pose.copy().reshape(15, 3)  # (15개 관절, axis-angle)
+    flipped[:, 1] = -flipped[:, 1]  # y축 반전
+    flipped[:, 2] = -flipped[:, 2]  # z축 반전
+    return flipped.reshape(45)
+
+
+def prepare_ho3d(ho3d_root, output_path, split='train', augment_left=True):
+    """
+    HO3D pkl에서 hand_pose(45차원) 시퀀스 추출 + 왼손 augmentation
+
+    augment_left=True면 오른손 데이터를 반전해서 왼손 데이터도 생성
+    → 데이터 2배, 좌우 모두 커버
+    """
+    split_dir = os.path.join(ho3d_root, split)
+    sequences = sorted(os.listdir(split_dir))
+
+    all_poses_right = []   # 오른손 시퀀스 리스트
+    all_poses_left  = []   # 왼손(반전) 시퀀스 리스트
+
+    for seq_name in tqdm(sequences, desc="시퀀스 처리 중"):
+        meta_dir = os.path.join(split_dir, seq_name, 'meta')
+        if not os.path.exists(meta_dir):
+            continue
+
+        pkl_files = sorted([f for f in os.listdir(meta_dir) if f.endswith('.pkl')])
+
+        seq_poses_right = []
+        seq_poses_left  = []
+
+        for pkl_file in pkl_files:
+            try:
+                data = load_pkl(os.path.join(meta_dir, pkl_file))
+                hand_pose_full = data['handPose']   # (48,)
+                hand_pose = hand_pose_full[3:]      # (45,) global_orient 제외
+
+                seq_poses_right.append(hand_pose)
+
+                if augment_left:
+                    seq_poses_left.append(flip_hand_pose(hand_pose))
+
+            except Exception as e:
+                print(f"[WARN] {seq_name}/{pkl_file} 로드 실패: {e}")
+                continue
+
+        if len(seq_poses_right) < 2:
+            continue
+
+        all_poses_right.append(np.array(seq_poses_right, dtype=np.float32))
+        if augment_left:
+            all_poses_left.append(np.array(seq_poses_left, dtype=np.float32))
+
+        print(f"  {seq_name}: {len(seq_poses_right)} 프레임")
+
+    # 오른손 + 왼손 합치기
+    all_sequences = all_poses_right + all_poses_left  # 리스트 합치기
+    seq_lengths   = [len(s) for s in all_sequences]
+    all_poses_concat = np.concatenate(all_sequences, axis=0)  # (N, 45)
+
+    np.savez(output_path,
+             hand_pose=all_poses_concat,
+             seq_lengths=np.array(seq_lengths))
+
+    total_right = sum(len(s) for s in all_poses_right)
+    total_left  = sum(len(s) for s in all_poses_left)
+
+    print(f"\n저장 완료: {output_path}")
+    print(f"오른손 프레임: {total_right}")
+    print(f"왼손(반전) 프레임: {total_left}")
+    print(f"총 프레임: {total_right + total_left}")
+    print(f"총 시퀀스: {len(all_sequences)}")
+
+
+if __name__ == "__main__":
+    prepare_ho3d(
+        ho3d_root="C:/HO3D_v3",
+        output_path="ho3d_hand_poses.npz",
+        split='train',
+        augment_left=True   # False로 하면 오른손만
+    )
